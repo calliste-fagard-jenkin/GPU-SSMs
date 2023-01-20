@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+authors:
+- family-names: "Fagard-Jenkin"
+  given-names: "Calliste"
+  orcid: "https://orcid.org/0000-0001-6786-4936"
+- family-names: "Thomas"
+  given-names: "Len"
+  orcid: "https://orcid.org/0000-0002-7436-067X"
+title: "GPU-accelerated pMCMC for Population Dynamics SSMs"
+version: 1.0.0
+doi: 10.5281/zenodo.7554608
+date-released: 2023-01-20
+url: "https://github.com/calliste-fagard-jenkin/GPU-SSMs"
