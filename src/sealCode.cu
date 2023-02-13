@@ -1087,7 +1087,7 @@ float scaledGammaLogDensity(float x, float alpha, float beta, float offset_0, fl
     //           offset_0 - The multiplicative link offset i.e B in Y = A + B * X
     //           offset_1 - The additive link offset i.e A in Y = A + B * X
     if (x < 0 || alpha < 0 || beta < 0) return(-1.79e308);
-    return dgamma((x - offset_1) / offset_0, alpha, beta, 1); // pdf at standard point
+    return dgamma((x - offset_1) / offset_0, alpha, beta, 1) / offset_0; // pdf at standard point
 }
 
 float scaledBetaLogDensity(float x, float alpha, float beta, float offset_0, float offset_1) {
@@ -1099,7 +1099,7 @@ float scaledBetaLogDensity(float x, float alpha, float beta, float offset_0, flo
     //           offset_0 - The multiplicative offset i.e B in Y = A + B * X
     //           offset_1 - The additive offset i.e A in Y = A + B * X
     if (x < 0 || alpha < 0 || beta < 0) return(-1.79e308);
-    return dbeta((x - offset_1) / offset_0, alpha, beta, 1);
+    return dbeta((x - offset_1) / offset_0, alpha, beta, 1) / offset_0;
 }
 
 float getPriorLogDensity(parameterSpec* priors, float* theta, int n) {
