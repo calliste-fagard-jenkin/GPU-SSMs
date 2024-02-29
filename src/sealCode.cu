@@ -97,70 +97,6 @@ __global__ void dGammaGeneralGPU(float* d_totals, float* d_output, int n, float 
     if (tid < n) d_output[tid] += dGammaGPUfunc(d_totals[tid], k0);
 }
 
-__global__ void printColMeansGPUint(int* d_matrix, int rows, int cols, bool byrow) {
-    /*
-    purpose : Prints the column means of a matrix which is stored on the GPU.
-    inputs  : d_matrix - The matrix where the values to print are stored
-              rows     - The number of rows in the matrix
-              cols     - The number of columns in the matrix
-              byrow    - if true, the matrix is stored row by row, instead of column by column
-    NOTE: This function is designed to be executed by a single thread. It hasn't been optimised
-          at all because it is primarily used for debugging and still runs far faster than the 
-          functions it is used to diagnose.
-    */
-
-    if (!byrow) {
-        for (int y = 0; y < cols; y++) {
-            double total = 0;
-            for (int x = 0; x < rows; x++) total += d_matrix[y * rows + x];
-            printf("%f ", total / double(rows));
-        }
-    }
-
-    else {
-        for (int y = 0; y < cols; y++) {
-            int total = 0;
-            for (int x = 0; x < rows; x++) total += d_matrix[x * cols + y];
-            printf("%f ", total / float(rows));
-        }
-    }
-    printf("\n");
-}
-
-template <class T>
-__global__ void reorderMatrixRows(T* d_mat, T* d_mat_copy, int* d_indices, int r, int c){
-    /*
-    purpose : Copies over one matrix to another, using a vector of row indices to be selected
-    inputs  : d_mat      - The pointer to where the original values are stored
-              d_mat_copy - The pointer to the new matrix location
-              d_indices  - The vector of indices of rows to keep
-              r          - The number of rows in the matrix
-              c          - The number of columns in the matrix
-    note    : This function assumed that the matrices are stored 'by column' and not 'by row'
-    */
-
-    unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
-
-    if (tid < r){
-        int row = d_indices[tid];
-        for (unsigned int j = 0; j < c; j++) d_mat_copy[j * r + tid] = d_mat[j * r + row];
-    }
-}
-
-void printColMeansIndexInt(int* d_mat, int* d_indices, int rows, int cols){
-    int m_size = sizeof(int) * rows * cols;
-    
-    int* d_mat_copy;
-    checkCudaErrors(cudaMalloc((void**)&d_mat_copy, m_size));
-    int tpb = 256;
-    int blocks = rows / tpb;
-    blocks = blocks * tpb >= rows ? blocks : blocks + 1;
-    
-    reorderMatrixRows<<<blocks, tpb>>>(d_mat, d_mat_copy, d_indices, rows, cols);
-    printColMeansGPUint<<<1, 1>>>(d_mat_copy, rows, cols, false);
-    checkCudaErrors(cudaFree(d_mat_copy));
-}
-
 template <class CS>
 __global__ void setCurandSeeds(CS* d_states, int n, time_t seed) {
     // purpose : Sets up the initial seeds for a collection of states to be used by the curand
@@ -246,21 +182,6 @@ int rmvnorm(float* output, float* means, FM R) {
     return 0;
 }
 
-
-template <class CS>
-__device__ int rbinomSlow(int n, float p, CS* state_address) { //rename to GPU
-    // purpose: Generates a binomial random deviate using the curand device API. Uses a slow method
-    //          which generates n uniforms and checks if they are smaller than p to create the total
-    //          count. This leads to thread divergence and is straight up dumb, but it's just to 
-    //          be able to debug the normal approximation code.
-    // inputs : n     - The number of trials to be performed
-    //          p     - The probability of success for a given trial
-    //          state - curandState pointer for RNG with the curand device API
-    int total = 0;
-    for (int i = 0; i < n; i++) if (curand_uniform(state_address) < p) total++;
-    return(total);
-}
-
 template <class CS>
 __device__ int rbinomLowNP(int n, float pp, CS* state_address){
     // Note: There is no need to point to a local state address here, since it is 
@@ -306,7 +227,6 @@ __device__ int rbinomNormApprox(int n, float p, CS* state_address) {
     //       or none at all
     float np = n * p, q = 1 - p, nq = n * q;
     if (np < 30 | nq < 30) return(rbinomLowNP(n, p, state_address));
-    //return(rbinomSlow(n, p, state_address));
 
     else {
         float normals = curand_normal(state_address);
@@ -329,33 +249,9 @@ __device__ int rnbinomNormApprox(int n, float p, CS* state_address) {
     return (output < 0) ? 0 : output;
 }
 
-__device__ float fmin2_device(float x, float y) {
-    return (x < y) ? x : y;
-}
-
-
 __device__ float fabs_device(float x) {
     return (x < 0) ? -x : x;
 }
-
-template <class T>
-__global__ void expGPU(T* d_vector, int n) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid < n) d_vector[tid] = exp(d_vector[tid]);
-}
-
-template <class T>
-__global__ void addConstExpGPU(T* d_vector, T a, int n) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid < n) d_vector[tid] = exp(d_vector[tid] + a);
-}
-
-template <class T>
-__global__ void ExpWithFloorGPU(T* d_vector, T a, T b, int n) {
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid < n) d_vector[tid] = (d_vector[tid] < a) ? b : exp(d_vector[tid]);
-}
-
 
 template <class CS>
 __global__ void generateCurandNormals(CS* d_states, float* d_results, int n) {
@@ -380,18 +276,6 @@ __global__ void fillWithConst(T* d_vector, T constant, int n) {
 }
 
 template <class T>
-void sapply(T* vector, T(*f)(T), int n) {
-    // purpose : A way of trying to reproduce implicit looping in R for simple tasks to avoid
-    //           an unnescessary army of for loops
-    // inputs  : vector - The vector of ints to perform element-wise actions on
-    //           f      - The function to be applied to each element of vector
-    //           n      - The number of elements of n upon which to perform the function
-    // note    : This function isn't made available to the device because indices should be dealt
-    //           with more cleverly to ensure coalesced reads.
-    for (int i = 0; i < n; i++) vector[i] = (*f)(vector[i]);
-}
-
-template <class T>
 T Min(T* arg, int n) {
     // purpose : Returns the minimum of a vector
     // inputs  : floats - The vector of ints
@@ -413,108 +297,6 @@ T Max(T* arg, int n) {
     float temp = arg[0];
     for (int i = 1; i < n; i++) if (arg[i] > temp) temp = arg[i];
     return(temp);
-}
-
-template <class T>
-float mean(T* vector, int n) {
-    // purpose : Finds the mean of a vector
-    // inputs  : vector - Pointer to the vector of values
-    //           n      - The number of values to average over
-
-    float total = 0;
-    for (int i = 0; i < n; i++) total += float(vector[i]);
-    return (total / n);
-}
-
-template <class T>
-float squaredDiffs(T* vector, int n, float mu) {
-    // purpose : returns the total sum of squared differences between a vector a given float
-    // inputs  : vector - The values to be differenced
-    //           n      - The number of values ot be considered
-    //           mu     - The constant with respect the differences should be taken
-    float total = 0;
-    for (int i = 0; i < n; i++) {
-        float entry = (vector[i] - mu);
-        total += entry * entry;
-    }
-    return(total);
-}
-
-template <class T>
-void addJitter(T* input, T factor, int n) {
-    /*
-    purpose : Adds normal noise to a vector with standard deviation proportional to the magnitude
-              of the entry
-    inputs  : input  - Pointer to the input array
-              factor - The multiplier of the absolute value of the entry that determines the 
-                       standard deviation of its noise
-    */
-    // 
-    //            
-    //                     
-    //            n      - The number of entries in the input array
-    for (int i = 0; i < n; i++) input[i] = rnorm(input[i], tabs(input[i]) * factor);
-}
-
-template <class T>
-__host__ float sd(T* vector, int n) {
-    // purpose : Find the standard deviation of a vector
-    // inputs  : vector - Pointer to the vector of values
-    //           n      - The number of values to work with
-    float mu = mean(vector, n);
-    mu = squaredDiffs(vector, n, mu);
-    return(sqrt(mu / (n - 1)));
-}
-
-template <class T>
-T tabs(T number) {
-    // purpose : A float version of fabs, to avoid constant casting to doubles (since this
-    //           will be very wasteful on the GPU.
-    // inputs  : number - A single floating point number
-    // output  : A single floating point number; the absolute value of 'number'
-    // NOTE    : THIS MAY LEAD TO HALF OF THREADS WAITING IDLE IF THE SPLIT OF NUMBERS BEING DEALT
-    //           WITH BY A WARP IS CLOSE TO HALF AND HALF POSITIVE AND NEGATIVE.
-    //           This step represents represents a very small proportion of the computational effort
-    //           and so in practice this probably isn't a concern.
-    if (number > 0) return(number);
-    else return(-number);
-}
-
-template <class T>
-void printMatrix(T* matrix, int rownum, int colnum, bool byrow) {
-    // purpose : Prints a matrix to the console
-    // inputs  : matrix - A pointer to a one dimensional array representing a matrix
-    //           rownum - The number of rows in the matrix
-    //           colnum - The number of columns in the matrix
-    //           byrow  - If true, the matrix is stored by row, instead of by columns
-
-    if (byrow) {
-        for (int x = 0; x < rownum; x++) {
-            for (int y = 0; y < colnum; y++) std::cout << matrix[x * colnum + y] << " ";
-            std::cout << std::endl;
-        }
-        std::cout << std::endl;
-    }
-
-    else {
-        for (int x = 0; x < rownum; x++) {
-            for (int y = 0; y < colnum; y++) std::cout << matrix[y * rownum + x] << " ";
-            std::cout << std::endl;
-        }
-        std::cout << std::endl;
-    }
-}
-
-
-template <class T>
-void normalise(T* vector, int n) {
-    // purpose : Turns of a vector of numbers into a version where the entries sum to one
-    // inputs  : vector - The vector of values to normalise
-    //           n      - The number of entries in the vector
-
-    T total = 0;
-    for (int i = 0; i < n; i++) total += vector[i];
-    for (int i = 0; i < n; i++) vector[i] /= total;
 }
 
 template <class T>
@@ -547,136 +329,109 @@ __global__ void systematicSamplingGPU(int* d_out, T* d_weights, T* d_ws, int n, 
 }
 
 template <class T>
-__global__ void printColMeansGPU(T* d_matrix, int rows, int cols, bool byrow, int mode = 0) {
-    // purpose : Prints the column means of a matrix which is stored on the GPU.
-    // inputs  : d_matrix - The matrix where the values to print are stored
-    //           rows     - The number of rows in the matrix
-    //           cols     - The number of columns in the matrix
-    //           byrow    - if true, the matrix is stored row by row, instead of column by column
-    //           mode     - 0 - returns the mean, 1 for the min and 2 for the max, 3 for the sum
-    // NOTE: This function is designed to be executed by a single thread. It hasn't been optimised
-    //       at all because it is primarily used for debugging and still runs far faster than the 
-    //       functions it is used to diagnose.
-
-    if (!byrow) {
-        for (int y = 0; y < cols; y++) {
-            T t = (mode == 0) ? 0 : d_matrix[0];
-
-            for (int x = 0; x < rows; x++) {
-                switch (mode) {
-                case 0: t += d_matrix[y * rows + x]; break;
-                case 1: t = (t > d_matrix[y * rows + x]) ? d_matrix[y * rows + x] : t; break;
-                case 2: t = (t < d_matrix[y * rows + x]) ? d_matrix[y * rows + x] : t; break;
-                case 3: t += d_matrix[y * rows + x]; break;
-                }
-            }
-
-            t = (mode == 0) ? t / float(rows) : t;
-            printf("%f ", t);
-        }
+__global__  void naiveSumGPU(T* d_input, T* d_output, int start, int end){
+    /*
+    purpose : This kernel is designed to be a single threaded addition 
+              function that only deals with summing the remainder
+              when the workload has been chopped up into blocks of tpb.
+    inputs  : d_input  - The vector of elements to be summed
+              d_output - The output variable where the sum should be
+                         written
+              start    - The first index which should be summed
+              end      - The index up until the sum should continue
+    Note    : In practice it is hoped that this function will be used 
+              very little, since careful consideration of block sizes
+              should avoid having remainders at every iteration
+    */
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    if (tid == 0){
+        for (int i = start; i < end; i++) d_output[0] += d_input[i];
     }
-
-    else {
-        for (int y = 0; y < cols; y++) {
-            T t = (mode == 0) ? 0 : d_matrix[0];
-            for (int x = 0; x < rows; x++) {
-                switch (mode) {
-                case 0: t += d_matrix[x * cols + y]; break;
-                case 1: t = (t > d_matrix[x * cols + y]) ? d_matrix[x * cols + y] : t; break;
-                case 2: t = (t > d_matrix[x * cols + y]) ? d_matrix[x * cols + y] : t; break;
-                }
-            }
-
-            t = (mode == 0) ? t / float(rows) : t;
-            printf("%f ", t);
-        }
-    }
-
-    printf("\n");
-
 }
 
 template <class T>
-__host__ void printColMeans(T* matrix, int rows, int cols, bool byrow) {
-    // purpose : Prints the column means of a matrix which is stored on the GPU.
-    // inputs  : d_matrix - The matrix where the values to print are stored
-    //           rows     - The number of rows in the matrix
-    //           cols     - The number of columns in the matrix
-    //           byrow    - if true, the matrix is stored row by row, instead of column by column
-    // NOTE: This function is designed to be executed by a single thread. It hasn't been optimised
-    //       at all because it is primarily used for debugging and still runs far faster than the 
-    //       functions it is used to diagnose.
+__global__ void reduceSumGPU(T* d_input, T* d_output){
+    /*
+    purpose : Performs a sum reduction of a fixed blocksize using sequential addressing
+    inputs  :  d_input  - The data to be summed.
+               d_output - The location of the output. Can be the same as the input if this
+                          does not need to be preserved
+    Note    : This function is designed to work with perfect powers of two, and the 
+              gridsize / blocksize will determine the behaviour
+    Note    : This function dynamically allocated its shared memory allocation, and so
+              when the kernel is invoked, sizeof(T) * thread_per_block must be added to 
+              the kernel call after the grid and block dimensions
+    */
+    unsigned int i = threadIdx.x;
+    unsigned int tid = i + blockIdx.x * blockDim.x * 2;
 
-    if (!byrow) {
-        for (int y = 0; y < cols; y++) {
-            T total = 0;
-            for (int x = 0; x < rows; x++) total += matrix[y * rows + x];
-            printf("%f ", total / float(rows));
-        }
-    }
+    // Ask for the shared memory this thread will use:
+    extern __shared__ T sdata[];
 
-    else {
-        for (int y = 0; y < cols; y++) {
-            T total = 0;
-            for (int x = 0; x < rows; x++) total += matrix[x * cols + y];
-            printf("%f ", total / float(rows));
-        }
-    }
+    // Do one addition while loading the data into shared mem:    
+    sdata[i] = (T) d_input[tid] + d_input[tid + blockDim.x];
 
-    printf("\n");
-}
-
-// Sum reduction code adapted from:
-// https://enccs.github.io/CUDA/3.01_ParallelReduction/
-__device__ __forceinline__ float getValue(const float* data, int index,
-    int n){
-    if (index < n) return data[index];
-    else return 0.0f;
-}
-
-__global__ void reduce_kernel(const float* data, float* result,
-    int n){
-    extern __shared__ float s_data[];
-
-    int s_i = threadIdx.x;
-    int d_i = threadIdx.x + blockIdx.x * 2 * blockDim.x;
-
-    s_data[s_i] = getValue(data, d_i, n) +
-        getValue(data, d_i + blockDim.x, n);
-    
-    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1){
+    // Perform the reduction:
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1){
+        if (i < s) sdata[i] += sdata[i + s];   
         __syncthreads();
-        if (s_i < offset) s_data[s_i] += s_data[s_i + offset];
     }
 
-    if (s_i == 0) result[blockIdx.x] = s_data[0];
+    // The lead thread in the block writes the output sum from the block:
+    if (i == 0) d_output[blockIdx.x] = (T) sdata[0];
 }
 
-__host__ void sumReductionGPU(float* d_input, float* d_output, int n, int tpb){
-    
-    int B = n / 2 / tpb + 1;
-    size_t shared_memsize = tpb * sizeof(float);
+template <class T>
+void sumReductionGPU(T* d_input, T* d_out, int n, int tpb){
+    /*
+    purpose : Uses the reduceSumGPU kernel which performs a single pass of a sum
+              reduction with multiple iterations to find the sum of a vector
+              of any length
+    inputs  : d_input - The vector to be summed
+              d_out   - The location where the final answer should be stored
+              n       - The length of the vector
+              tpb     - The number of threads per block to be used
 
-    float* d_result1;
-    float* d_result2;
-    cudaMalloc((void**)&d_result1, B * sizeof(float));
-    cudaMalloc((void**)&d_result2, B * sizeof(float));
-    reduce_kernel<<<B, tpb, shared_memsize>>>(d_input, d_result1, n);
-    for (int n_current = B; n_current > 1; ){
-        int B_current = n_current / 2 / B + 1;
+    NOTE : With doubles, tpb = 64 is the highest that can be done without causing errors due to 
+           insufficient shared memory
+    */
+    // Determine initial grid size:
+    int twotpb = 2 * tpb;
+    int blocks = n / twotpb;
+    int r = n % twotpb;
 
-        reduce_kernel<<<B_current, tpb, shared_memsize>>>(d_result1, d_result2,
-                n_current);
+    // Create the output vector:
+    T* d_output;
+    checkCudaErrors(cudaMalloc((void**)&d_output, sizeof(T) * blocks));
+    fillWithConst<<<1, 1>>>(d_out, (T) 0, 1);
 
-        n_current = B_current;
-        std::swap(d_result1, d_result2);
+    // First reduction:
+    if (r > 0) naiveSumGPU<<<1, 1>>>(d_input, d_out, blocks * tpb, blocks * tpb + r);
+    reduceSumGPU<<<blocks, tpb, sizeof(T) * tpb>>>(d_input, d_output);
+
+    // Recalculate settings:
+    n = blocks;
+    blocks = n / twotpb;
+    r = n % twotpb;
+
+    // All other reductions:
+    while (blocks > 0){
+
+        // Perform the reduction:
+        if (r > 0) naiveSumGPU<<<1, 1>>>(d_output, d_out, n - r, n);
+        reduceSumGPU<<<blocks, tpb, sizeof(T) * tpb>>>(d_output, d_output);
+
+        // Recalculate settings:
+        n = blocks;
+        blocks = n / twotpb;
+        r = n % twotpb;
     }
-    
-    checkCudaErrors(cudaMemcpy(d_output, d_result1, sizeof(float),
-        cudaMemcpyDeviceToDevice));
-    
-    cudaFree(d_result1);
-    cudaFree(d_result2);
+
+    // Add the final < tpb numbers:
+    if (r > 0) naiveSumGPU<<<1, 1>>>(d_output, d_out, 0, r);
+
+    // Free memory:
+    checkCudaErrors(cudaFree(d_output)); 
 }
 
 template <class T>
@@ -762,7 +517,6 @@ void parallelMax(T* d_in, T* d_output, int n, int tpb, int apt){
     checkCudaErrors(cudaFree(d_out));
 }//end function
 
-
 template <class T, class CS>
 __global__ void metropolisResampleGPU(T* d_weights, int* d_out, CS* d_states, int n,
     int B, int logw = 0) {
@@ -844,32 +598,6 @@ __global__ void rejectionResampleGPU(T* d_weights, int* d_out, CS* d_states, int
     }//end if tid
 }//end function
 
-template <class T>
-__global__ void sumTableGPU(T* d_table, T* d_output, int n_row, int n_col, int set = 1){
-    /*
-    purpose : Goes through a table (which is indexed by columns) and writes the sum
-              of each row to an output vector
-    inputs  : d_table  - The pointer to the start of the table 
-              d_output - The vector to which the output should be written
-              n_row    - The number of rows in the table
-              n_col    - The number of columns in the table
-              set      - If >= 1, then the function will reset the output vector 
-                         entries to 0 before incrementing with the total of each row
-    output  : void
-
-    Note: Although the by columns structure helps a little elsewhere in the code, it
-          makes it impossible to do coalesced accesses here
-    */
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    T rowsum;
- 
-    if (tid < n_row){
-        for (int i = 0; i < n_col; i++) rowsum += d_table[tid + n_row * i];
-        if (set >= 1) d_output[tid] = 0;
-        d_output[tid] += rowsum;
-    }
-}
-
 ////////////////////////////////////////////// END OF UTILS ////////////////////////////////////////
 
 /////////////////////////////////////////// SEALS CODE GPU /////////////////////////////////////////
@@ -949,7 +677,6 @@ __global__ void produceIntitialStatesGPU(int* d_states, float* d_theta, int y_0,
         // Update global state:
         d_curand_states[tid] = local_state;
     }
-
 }
 
 __global__ void sampleStatesDevAPI(int* d_states, int* d_new_states, int* d_rows,
@@ -966,14 +693,7 @@ __global__ void sampleStatesDevAPI(int* d_states, int* d_new_states, int* d_rows
     //           n          - The number of states currently being dealt with
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     if (tid < n) {
-       
-/*	float local_theta0 = d_theta[0];
-	float local_theta1 = d_theta[1];
-	float local_theta2 = d_theta[2];
-	float local_theta3 = d_theta[3];
-	float local_theta4 = d_theta[4];
-	float local_theta6 = d_theta[6];
-*/       
+           
 	float omega = include_omega > 0 ? d_theta[6] : 2.0f;
         curandState local_state = d_curand_states[tid];
         int row = d_rows[tid];
@@ -1012,72 +732,6 @@ __global__ void sampleStatesDevAPI(int* d_states, int* d_new_states, int* d_rows
     }
 }
 
-template <class T>
-void uniformProposal(T* input_vector, T* output_vector, T* stepsize_vector, int n) {
-    // purpose : Produces a uniform random walk proposal for a vector of values given a vector of 
-    //           stepsizes
-    // inputs  : input_vector    - The vector of current values
-    //           output_vector   - Pointer to the memory where new values should be stored
-    //           stepsize_vector - The vector of stepsizes for the jumps in each dimension
-    //           n               - The number of parameters for which new values should be proposed
-    for (int i = 0; i < n; i++) {
-        T U = runif(0, 1) * stepsize_vector[i];
-        output_vector[i] = input_vector[i] + U;
-    }
-}
-
-template <class T>
-int isotropicGaussianProposal(T* input_vector, T* output_vector, float* sigma_vector,
-    int n, int one) {
-    // purpose : Produces a uniform random walk proposal for a vector of values given a vector of 
-    //           stepsizes
-    // inputs  : input_vector    - The vector of current values
-    //           output_vector   - Pointer to the memory where new values should be stored
-    //           stepsize_vector - The vector of stepsizes for the jumps in each dimension
-    //           n               - The number of parameters for which new values should be proposed
-    //           one             - If one >= 1, then the proposal only modifies one parameter
-    // output  : In the case of a single update, returns the index of the modified parameter. 
-    //           Otherwise returns 0.
-
-    if (one) {
-        int index = (n == 1) ? 0 : floor(runif(0, n));
-        memcpy(output_vector, input_vector, sizeof(T) * n);
-        output_vector[index] = rnorm(input_vector[index], sigma_vector[index]);
-        return index;
-    }
-
-    else {
-        for (int i = 0; i < n; i++) {
-            output_vector[i] = rnorm(input_vector[i], sigma_vector[i]);
-        }
-
-        return 0;
-    }
-}
-
-template <class T>
-__global__ void uniformProposalGPU(T* d_input_vector, T* d_output_vector, T* d_stepsize_vector,
-    int n, curandState* d_states) {
-    // purpose : Produces a uniform random walk proposal for a vector of values given a vector of 
-    //           stepsizes
-    // inputs  : input_vector    - The vector of current values
-    //           output_vector   - Pointer to the memory where new values should be stored
-    //           stepsize_vector - The vector of stepsizes for the jumps in each dimension
-    //           n               - The number of parameters for which new values should be proposed
-    //           generator       - The generator object for engendering our uniform deviates
-
-    // Note : This kernel exists not because we expect to save time by performing the proposal on 
-    //        the GPU, but to avoid a memcpy back to the CPU just to perform a relatively simple
-    //        task.
-
-    int tid = threadIdx.x;
-
-    if (tid < n) {
-        T U = curand_uniform(&d_states[tid]) * d_stepsize_vector[tid];
-        d_output_vector[tid] = d_input_vector[tid] + U;
-    }
-}
-
 float scaledGammaLogDensity(float x, float alpha, float beta, float offset_0, float offset_1) {
     // purpose : Evaluates the density of the generalised gamma distribution using the C code
     //           underpinning R's dgamma function.
@@ -1087,7 +741,7 @@ float scaledGammaLogDensity(float x, float alpha, float beta, float offset_0, fl
     //           offset_0 - The multiplicative link offset i.e B in Y = A + B * X
     //           offset_1 - The additive link offset i.e A in Y = A + B * X
     if (x < 0 || alpha < 0 || beta < 0) return(-1.79e308);
-    return dgamma((x - offset_1) / offset_0, alpha, beta, 1) / offset_0; // pdf at standard point
+    return dgamma((x - offset_1) / offset_0, alpha, beta, 1) / offset_0;
 }
 
 float scaledBetaLogDensity(float x, float alpha, float beta, float offset_0, float offset_1) {
@@ -1152,23 +806,6 @@ void sealsThetaMapGeneral(float* input, float* output, int R, int n){
     memcpy(&output[3], &input[5 + n], sizeof(float)); // chi
     memcpy(&output[4], &input[3], sizeof(float) * 2); // rho, psi
     memcpy(&output[6], &input[5 + R], sizeof(float)); // omega
-}
-
-void sealsThetaMapCloning(float* input, float* output, int R, int n){
-    // purpose : Extracts the region specific parameters from a vector of all parameters for the
-    //           multi-region seals model, including the sex-ratio parameter, but assumed there
-    //           are four regions, like the original data-set, and keeps cycling through those
-    //           four carrying capacity values
-    // inputs  : input  - Array with parameters for all regions
-    //           output - Where to write the region specific parameters
-    //           R      - The total number of regions
-    //           n      - The region number we are currently fetching for 
-    // Input order is : [phi_pmax, phi_a, alpha, rho, phi, all chi, omega]
-    // Output order is : [phi_pmax, phi_a, alpha, all chi, rho, phi, omega]
-    memcpy(&output[0], &input[0], sizeof(float) * 3); // phi_pmax, phi_a, alpha
-    memcpy(&output[3], &input[5 + n % 4], sizeof(float)); // chi
-    memcpy(&output[4], &input[3], sizeof(float) * 2); // rho, psi
-    memcpy(&output[6], &input[9], sizeof(float)); // omega
 }
 
 template <class T>
@@ -1480,43 +1117,13 @@ __host__ float bootstrapFilterLooper(int T, int** y, int* y0, float* theta_all,
         return output;
 }
 
-__host__ float bootstrapFilterCloning(int T, int** y, int* y0, float* theta_all,
-    int n, int n_s, int tpb, float** h_weights, int*** d_old_states, int*** d_new_states,
-    int** d_indices, float** d_weights, float** d_pop_totals, float** d_weights_sum,
-    float*** d_theta, float** h_theta, curandState** d_curand_states, int n_theta_R, int G, int B,
-    int R, int* extra_eval_ind, void (*thetaMap) (float*, float*, int, int), float* k0,
-    int n_indep_ests, float (*dGammaChoice) (float, float) = &dGammaFixed, float M = -23.0f, 
-    int L = 1, int C = 1){
-        /*
-        purpose : Uses the bootstrapFilterMultiRegionForMCMC function to perform multiple particle
-                  filter evaluations to estimate the value of the log likelihood by taking their
-                  mean
-        inputs  : L - The number of calls to the particle filter to use to obtain the final 
-                      estimate. All other parameters are identical to the bootstrap filter
-                      that this function uses
-                  C - The number of times the data set has been cloned. i.e. with 4 regions and
-
-        */
-        float output = 0;
-        for (unsigned int c = 0; c < C; c++){
-            for (unsigned int i = 0; i < L; i++){
-                output += bootstrapFilterMultiRegionForMCMC(T, y, y0, theta_all, n, n_s, tpb, 
-                    h_weights, d_old_states, d_new_states, d_indices, d_weights, d_pop_totals,
-                    d_weights_sum, d_theta, h_theta, d_curand_states, n_theta_R, G, B, R,
-                    extra_eval_ind, thetaMap, k0, n_indep_ests, dGammaChoice, M) / L;
-            }
-        }
-
-        return output;
-}
-
 template <class FM>
 void sealsMallocsForMCMC_DEV(float*** &d_theta, float** &d_weights, float** &h_weights,
     int*** &d_old_states, int*** &d_new_states, int** &d_indices, float** &d_pop_totals,
     float** &d_weights_sum, curandState** &d_curand_states, float** &h_theta_single_region,
     float* &h_old_theta, float* &h_theta_proposed, float* &accepted_count,
     float* &proposed_count, int G, int R, int n_theta_region, int n_theta, int n_per_gpu,
-    float* &sigmas, FM sigma, size_t mat_size, int verbose, int prop_1p, int blocks, int tpb){
+    float* &sigmas, FM sigma, size_t mat_size, int verbose, int blocks, int tpb){
     /*
     purpose : Given some variables, will free the correct memory for all allocations created for,
               the bootstrap multi-region multi-gpu particle filter. This also initialises the 
@@ -1615,12 +1222,35 @@ void sealsMallocsForMCMC_DEV(float*** &d_theta, float** &d_weights, float** &h_w
         checkCudaErrors(cudaMallocHost((void**)&accepted_count, sizeof(float) * n_theta));
         checkCudaErrors(cudaMallocHost((void**)&proposed_count, sizeof(float) * n_theta));
     }
+}
 
-    if (prop_1p) {
-        // Setup for 1 at a time proposals:
-        checkCudaErrors(cudaMallocHost((void**)&sigmas, sizeof(float) * n_theta));
-        for (int i = 0; i < n_theta; i++) sigmas[i] = sigma(i, i);
-    }
+__host__ float bootstrapFilterCloning(int T, int** y, int* y0, float* theta_all,
+    int n, int n_s, int tpb, float** h_weights, int*** d_old_states, int*** d_new_states,
+    int** d_indices, float** d_weights, float** d_pop_totals, float** d_weights_sum,
+    float*** d_theta, float** h_theta, curandState** d_curand_states, int n_theta_R, int G, int B,
+    int R, int* extra_eval_ind, void (*thetaMap) (float*, float*, int, int), float* k0,
+    int n_indep_ests, float (*dGammaChoice) (float, float) = &dGammaFixed, float M = -23.0f, 
+    int L = 1, int C = 1){
+        /*
+        purpose : Uses the bootstrapFilterMultiRegionForMCMC function to perform multiple particle
+                  filter evaluations to estimate the value of the log likelihood by taking their
+                  mean
+        inputs  : L - The number of calls to the particle filter to use to obtain the final 
+                      estimate. All other parameters are identical to the bootstrap filter
+                      that this function uses
+                  C - The number of times the data set has been cloned. i.e. with 4 regions and
+        */
+        float output = 0;
+        for (unsigned int c = 0; c < C; c++){
+            for (unsigned int i = 0; i < L; i++){
+                output += bootstrapFilterMultiRegionForMCMC(T, y, y0, theta_all, n, n_s, tpb, 
+                    h_weights, d_old_states, d_new_states, d_indices, d_weights, d_pop_totals,
+                    d_weights_sum, d_theta, h_theta, d_curand_states, n_theta_R, G, B, R,
+                    extra_eval_ind, thetaMap, k0, n_indep_ests, dGammaChoice, M) / L;
+            }
+        }
+
+        return output;
 }
 
 
@@ -1630,7 +1260,7 @@ void sealsMemFreeForMCMC_DEV(float*** &d_theta, float** &d_weights, float** &h_w
     float** &d_weights_sum, curandState** &d_curand_states, float** &h_theta_single_region,
     float* &h_old_theta, float* &h_theta_proposed, float* &accepted_count,
     float* &proposed_count, int G, int R, int n_theta_region, int n_theta, int n_per_gpu,
-    float* &sigmas, FM sigma, size_t mat_size, int verbose, int prop_1p, int blocks, int tpb){
+    float* &sigmas, FM sigma, size_t mat_size, int verbose, int blocks, int tpb){
     /*
     purpose : Given some variables, will free the correct memory for all allocations created for,
               the bootstrap multi-region multi-gpu particle filter. This also initialises the 
@@ -1661,8 +1291,6 @@ void sealsMemFreeForMCMC_DEV(float*** &d_theta, float** &d_weights, float** &h_w
     blocks                - The number of blocks with which to run kernels
     tpb                   - The number of threads per block
     */
-    if (prop_1p) checkCudaErrors(cudaFreeHost(sigmas));
-    
     if (verbose) {
         checkCudaErrors(cudaFreeHost(accepted_count));
         checkCudaErrors(cudaFreeHost(proposed_count));    
@@ -1716,7 +1344,7 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
     int n_theta, int n_theta_region, int n_regions, int tpb, int T, int** y, int* y0,
     int create_csv_header, bool (*legalityChecks) (float*, int),
     void (*thetaMapper) (float*, float*, int, int), float* k0, int n_indep_ests, int G,
-    int B, int verbose, int prop_1p, int useR, int* EEI, float M, int L, int C = 1, 
+    int B, int verbose, int useR, int* EEI, float M, int L, int C = 1, 
     int ieCV = 27) {
     /*
     purpose : Performs a single chain of MCMC using particle filters
@@ -1754,9 +1382,6 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
               verbose              - If != 0, will print 20 updates throughout the MCMC, with 
                                      average acceptance ratios, which are given parameter by
                                      parameter for the one-by-one proposal.
-              prop_1p              - If != 0 will update parameters one-by-one by uniformly
-                                     selecting a parameter index, instead of proposing for all
-                                     parameters
               useR                 - If >= 1, the function will assume that the SD matrix is 
                                      to be considered as the precalculated matrix for
                                      multivariate normals. This is useful when starting a chain
@@ -1842,7 +1467,7 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
     sealsMallocsForMCMC_DEV(d_theta, d_weights, h_weights, d_old_states, d_new_states,
         d_indices, d_pop_totals, d_weights_sum, d_curand_states, h_theta_single_region,
         h_old_theta, h_theta_proposed, accepted_count, proposed_count, G, n_regions,
-        n_theta_region, n_theta, n_per_gpu, sigmas, sigma, mat_size, verbose, prop_1p,
+        n_theta_region, n_theta, n_per_gpu, sigmas, sigma, mat_size, verbose,
         blocks, tpb);
 
     // Copy over starting parameter values:
@@ -1850,7 +1475,7 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
         cudaMemcpyHostToHost));
 
     // Proposal covariance structure setup:
-    if (!prop_1p) R = (useR ? sigma : rmvnormPrep(sigma));
+    R = (useR ? sigma : rmvnormPrep(sigma));
 
     // Evaluate density at initial proposed parameters:
     previous_ltarget += getPriorLogDensity(prior_specifications, h_old_theta, n_theta);
@@ -1865,16 +1490,12 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
         // Print an update to the user:
         if ((i % (n_samples / n_printouts) == (n_samples / n_printouts) - 1) && verbose) {
             printf("Finished iteration %i with mean acceptances of ", i + 1);
-            if (prop_1p) for (int j = 0; j < n_theta; j++) printf("%f ",
-                accepted_count[j] / (proposed_count[j] + 1));
-            else printf("%f ", accepted_count[0] / (proposed_count[0] + 1));
+            printf("%f ", accepted_count[0] / (proposed_count[0] + 1));
             printf("\n");
         }
 
         // Propose new value for theta:
-        if (prop_1p) modified_par = isotropicGaussianProposal(h_old_theta, h_theta_proposed,
-            sigmas, n_theta, prop_1p);
-        else modified_par = rmvnorm(h_theta_proposed, h_old_theta, R);
+        modified_par = rmvnorm(h_theta_proposed, h_old_theta, R);
         if (verbose) proposed_count[modified_par] += 1;
 
         // Reject the proposal instantly if prior says NO:
@@ -1939,7 +1560,7 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
     sealsMemFreeForMCMC_DEV(d_theta, d_weights, h_weights, d_old_states, d_new_states,
         d_indices, d_pop_totals, d_weights_sum, d_curand_states, h_theta_single_region,
         h_old_theta, h_theta_proposed, accepted_count, proposed_count, G, n_regions,
-        n_theta_region, n_theta, n_per_gpu, sigmas, sigma, mat_size, verbose, prop_1p,
+        n_theta_region, n_theta, n_per_gpu, sigmas, sigma, mat_size, verbose,
         blocks, tpb);
 
     // reset devices :
@@ -1952,238 +1573,5 @@ void sealsMultiRegionMCMC(int n_samples, int n_particles, float* theta_0, FloatM
     fclose(debug_file);
 }
 
-void sealsNFinder(int n_samples, int n_particles, float* theta, char* filename,
-    int n_states, int n_theta, int n_theta_region, int n_regions, int tpb, int T,
-    int** y, int* y0, int create_csv_header, void (*thetaMapper) (float*, float*, int, int),
-    float* k0, int n_indep_ests, int* EEI, int G, int B, float incr, int n_incr, float M,
-    int L, int append, int ieCV){
-    /*
-    purpose : A wrapper that facilitates running the particle filter many times with different
-              values for n_particles.
-    inputs  : See sealsMultiRegionMCMC
-              incr   - The amount to increase N by each time, by multiplying the previous value
-              n_incr - The number of times to increment N before we end
-              L      - The number of times to call the same particle filter for each estimation of 
-                       the log likelihood
-    outputs : void, but writes output to a csv file with a given name
-    */
-
-    // Select the chosen dGamma function:
-    float (*h_dGamma)(float, float);
-    
-    switch(ieCV){
-        // Note: the static pointers for these functions are definied near the top of this same
-        //       file.
-        case 1:
-            cudaMemcpyFromSymbol(&h_dGamma, p_dGammaCV1, sizeof(float (*)(float, float)));
-            break;
-        case 5:
-            cudaMemcpyFromSymbol(&h_dGamma, p_dGammaCV5, sizeof(float (*)(float, float)));
-            break;
-        default:
-            cudaMemcpyFromSymbol(&h_dGamma, p_dGammaFixed, sizeof(float (*)(float, float)));
-            break;
-    }
-
-    // Create output file:
-    FILE* file;
-    file = append > 0 ? fopen(filename, "a") : fopen(filename, "w+");
-
-    // Add named columns if required:
-    if (create_csv_header) {
-        for (int i = 0; i < n_theta; i++) fprintf(file, "theta%i,", i);
-        fprintf(file, "N, G, B, log_target, k0\n");
-    }
-
-    // Pointers to time calculation:
-    auto start = std::chrono::high_resolution_clock::now(), end = start;
-    std::chrono::duration<double> diff;
-
-    // Host and device-side pointers for particle filters:
-    float*** d_theta, ** d_weights, ** h_weights, ** h_theta_single_region,
-        ** d_pop_totals, ** d_weights_sum;
-
-    int*** d_old_states, *** d_new_states, ** d_indices;
-    curandState** d_curand_states;
-
-    // Other required variables (we still malloc variables we don't need, just to be
-    // able to use the malloc and free utility functions that exist):
-    float previous_ltarget = 0;
-    float* h_old_theta, * h_theta_proposed, * accepted_count, * proposed_count,
-        * sigmas;
-    FloatMatrix R(n_theta, n_theta);
-
-    for (int i = 0; i < n_incr; i++){
-	    // Grid dimension setup:
-        n_particles = (n_particles % G == 0) ? n_particles : n_particles + G - (n_particles % G);
-        int n_per_gpu = n_particles / G;
-        int blocks = ceil(float(n_per_gpu) / tpb);
-        size_t mat_size = sizeof(int) * n_per_gpu * n_states;
-
-        // All mallocs, GPU-side and host-side are performed by this function:
-        sealsMallocsForMCMC_DEV(d_theta, d_weights, h_weights, d_old_states, d_new_states,
-            d_indices, d_pop_totals, d_weights_sum, d_curand_states, h_theta_single_region,
-            h_old_theta, h_theta_proposed, accepted_count, proposed_count, G, n_regions,
-            n_theta_region, n_theta, n_per_gpu, sigmas, R, mat_size, 0, 0, blocks, tpb);
-
-        // Copy over starting parameter values:
-        checkCudaErrors(cudaMemcpy(h_old_theta, theta, sizeof(float) * n_theta,
-            cudaMemcpyHostToHost));
-        
-        start = std::chrono::high_resolution_clock::now();
-        for (int iter = 0; iter < n_samples; iter++){
-
-            previous_ltarget = bootstrapFilterLooper(T, y, y0,
-                h_old_theta, n_particles, n_states, tpb, h_weights, d_old_states,
-                d_new_states, d_indices, d_weights, d_pop_totals, 
-                d_weights_sum, d_theta, h_theta_single_region, d_curand_states,
-                n_theta_region, G, B, n_regions, EEI, thetaMapper, k0,
-                n_indep_ests, h_dGamma, M, L);
-       
-            // Write result to file:
-            for (int l = 0; l < n_theta; l++){fprintf(file, "%f,", theta[l]);}
-            fprintf(file, "%i,%i,%i,%f,%f\n", n_particles, G, B, previous_ltarget, k0[0]);
-        }//for iter
-
-        // Print timing for benchmarking:
-        end = std::chrono::high_resolution_clock::now();
-        diff = end - start;
-        printf("Timing for n = %i, G = %i is %f\n", n_particles, G, diff / (float) n_samples);
- 
-        printf("Calculations for n_per_gpu = %i are finished\n", n_per_gpu);
-        n_particles *= incr;
-
-        // Frees all allocated memory:
-        sealsMemFreeForMCMC_DEV(d_theta, d_weights, h_weights, d_old_states, d_new_states,
-            d_indices, d_pop_totals, d_weights_sum, d_curand_states, h_theta_single_region,
-            h_old_theta, h_theta_proposed, accepted_count, proposed_count, G, n_regions,
-            n_theta_region, n_theta, n_per_gpu, sigmas, R, mat_size, 0, 0, blocks, tpb);
-    }//end for i
-
-    // Reset devices :
-    for (int dev_id = 0; dev_id < G; dev_id++) {
-        checkCudaErrors(cudaSetDevice(dev_id));
-        checkCudaErrors(cudaDeviceReset());
-    }
-
-    fclose(file);
-}//end sealsBFinder
-
-void sealsBFinder(int n_samples, int n_particles, float* theta, char* filename,
-    int n_states, int n_theta, int n_theta_region, int n_regions, int tpb, int T,
-    int** y, int* y0, int create_csv_header, void (*thetaMapper) (float*, float*, int, int),
-    float* k0, int n_indep_ests, int* EEI, int G, int B, float incr, int n_incr, float M,
-    int L, int append, int ieCV){
-    /*
-    purpose : A wrapper that facilitates running the particle filter many times with different
-              values for B, the number of metropolis resamples to use for particle resampling.
-    inputs  : See sealsMultiRegionMCMC
-              incr   - The amount to increase B by each time
-              n_incr - The number of times to increment B before we end
-              L      - The number of times to call the same particle filter for each estimation of 
-                       the log likelihood
-    outputs : void, but writes output to a csv file with a given name
-    */
-
-    // Select the chosen dGamma function:
-    float (*h_dGamma)(float, float);
-    
-    switch(ieCV){
-        // Note: the static pointers for these functions are definied near the top of this same
-        //       file.
-        case 1:
-            cudaMemcpyFromSymbol(&h_dGamma, p_dGammaCV1, sizeof(float (*)(float, float)));
-            break;
-        case 5:
-            cudaMemcpyFromSymbol(&h_dGamma, p_dGammaCV5, sizeof(float (*)(float, float)));
-            break;
-        default:
-            cudaMemcpyFromSymbol(&h_dGamma, p_dGammaFixed, sizeof(float (*)(float, float)));
-            break;
-    }
-
-    // Create output file:
-    FILE* file;
-    file = append > 0 ? fopen(filename, "a") : fopen(filename, "w+");
-
-    // Add named columns if required:
-    if (create_csv_header) {
-        for (int i = 0; i < n_theta; i++) fprintf(file, "theta%i,", i);
-        fprintf(file, "N, G, B, log_target, k0\n");
-    }
-
-    // Pointers to time calculation:
-    auto start = std::chrono::high_resolution_clock::now(), end = start;
-    std::chrono::duration<double> diff;
-
-    // Host and device-side pointers for particle filters:
-    float*** d_theta, ** d_weights, ** h_weights, ** h_theta_single_region,
-        ** d_pop_totals, ** d_weights_sum;
-
-    int*** d_old_states, *** d_new_states, ** d_indices;
-    curandState** d_curand_states;
-
-    // Other required variables (we still malloc variables we don't need, just to be
-    // able to use the malloc and free utility functions that exist):
-    float previous_ltarget = 0;
-    float* h_old_theta, * h_theta_proposed, * accepted_count, * proposed_count,
-        * sigmas;
-    FloatMatrix R(n_theta, n_theta);
-
-    // Grid dimension setup:
-    n_particles = (n_particles % G == 0) ? n_particles : n_particles + G - (n_particles % G);
-    int n_per_gpu = n_particles / G;
-    int blocks = ceil(float(n_per_gpu) / tpb);
-    size_t mat_size = sizeof(int) * n_per_gpu * n_states;
-
-    // All mallocs, GPU-side and host-side are performed by this function:
-    sealsMallocsForMCMC_DEV(d_theta, d_weights, h_weights, d_old_states, d_new_states,
-        d_indices, d_pop_totals, d_weights_sum, d_curand_states, h_theta_single_region,
-        h_old_theta, h_theta_proposed, accepted_count, proposed_count, G, n_regions,
-        n_theta_region, n_theta, n_per_gpu, sigmas, R, mat_size, 0, 0, blocks, tpb);
-
-    // Copy over starting parameter values:
-    checkCudaErrors(cudaMemcpy(h_old_theta, theta, sizeof(float) * n_theta, 
-        cudaMemcpyHostToHost));
-
-    for (int i = 0; i < n_incr; i++){
-	    B += incr;
-
-        start = std::chrono::high_resolution_clock::now();
-        for (int iter = 0; iter < n_samples; iter++){
-
-            previous_ltarget = bootstrapFilterLooper(T, y, y0,
-                h_old_theta, n_particles, n_states, tpb, h_weights, d_old_states,
-                d_new_states, d_indices, d_weights, d_pop_totals, 
-                d_weights_sum, d_theta, h_theta_single_region, d_curand_states,
-                n_theta_region, G, B, n_regions, EEI, thetaMapper, k0,
-                n_indep_ests, h_dGamma, M, L);
-       
-            // Write result to file:
-            for (int l = 0; l < n_theta; l++){fprintf(file, "%f,", theta[l]);}
-            fprintf(file, "%i,%i,%i,%f,%f\n", n_particles, G, B, previous_ltarget, k0[0]);
-        }//for iter
-
-        // Print timing for benchmarking:
-        end = std::chrono::high_resolution_clock::now();
-        diff = end - start;
-        printf("Timing for B = %i, G = %i is %f\n", n_particles, G, diff / (float) n_samples);
-        printf("Calculations for B = %i are finished\n", n_per_gpu);
-        n_particles *= incr;
-    }//end for i
-
-    // Frees all allocated memory:
-    sealsMemFreeForMCMC_DEV(d_theta, d_weights, h_weights, d_old_states, d_new_states,
-        d_indices, d_pop_totals, d_weights_sum, d_curand_states, h_theta_single_region,
-        h_old_theta, h_theta_proposed, accepted_count, proposed_count, G, n_regions,
-        n_theta_region, n_theta, n_per_gpu, sigmas, R, mat_size, 0, 0, blocks, tpb);
-
-    // Reset devices :
-    for (int dev_id = 0; dev_id < G; dev_id++) {
-        checkCudaErrors(cudaSetDevice(dev_id));
-        checkCudaErrors(cudaDeviceReset());
-    }
-
-    fclose(file);
-}//end sealsBFinder
-//////////////////////////////////////// END OF SEALS CODE GPU /////////////////////////////////////
+void debugRoutine(){
+}

@@ -18,7 +18,6 @@ int main() {
     n_theta_single_region = 7,   // Number of parameters needed to evaluate a single region
     n_regions = 4,               // The number of independent survey regions 
     verbose = 1,                 // >= 1 for extra output during MCMC
-    oneby1 = 0,                  // < 1 to ensure all parameters are updated with each proposal
     tpb = 512,                   // Threads per block of execution on the GPU(s)
     useR = 1,                    // >= 1 to use a pre-calculation proposal covariance structures
     EEI = 23,                    // Extra Eval Index - The timestep of the independent estimate 
@@ -27,14 +26,14 @@ int main() {
     T = 26,                      // The number of timesteps in the timeseries
     G = 2,                       // The number of GPUs to use for the calculation
     create_csv_header = 1,       // >= 1 To create column names in our output file
-    n_chains = 2,                // The number of MCMC chains to run
+    n_chains = 1,                // The number of MCMC chains to run
     L = 3,                       // The number of filters averaged together to estimate the llik
     ieCV = 27;                   // The coef of var of the independent estimate. Could be 1 or 5 too
     float M = -23.5;             // Helps in minimising numerical errors, application specific
     
     // Output file names:
     char debug_filename[] = "debug_file.csv";
-    char mcmc_basename[] = "paper_chain";
+    char mcmc_basename[] = "output/final_chain_3";
     char mcmc_endname[] = ".csv";
     char* mcmc_name;
 
@@ -131,7 +130,6 @@ int main() {
             n_particles, 
             theta,
             r0_paper,
-
             mcmc_name,
             debug_filename,
             prior_specs_pointer,
@@ -151,7 +149,6 @@ int main() {
             G,
             B,
             verbose,
-            oneby1,
             useR,
             &EEI,
             M,
